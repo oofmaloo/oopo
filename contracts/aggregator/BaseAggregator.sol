@@ -91,7 +91,7 @@ contract BaseAggregator is IBaseAggregator {
         routerData.router = router;
         routerData.active = true;
         vault = vault_;
-        addPlatformTokenToListInternal(router);
+        addRouterDataToListInternal(router);
         IERC20(asset).safeIncreaseAllowance(address(router), type(uint256).max);
         IERC20(token).safeIncreaseAllowance(address(router), type(uint256).max);
     }

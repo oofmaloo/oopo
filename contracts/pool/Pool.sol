@@ -2,50 +2,39 @@
 pragma solidity ^0.8.0;
 
 import {SafeMath} from '../../../dependencies/openzeppelin/contracts/SafeMath.sol';
-import {IERC20} from '../../../dependencies/openzeppelin/contracts/IERC20.sol';
-import {SafeERC20} from '../../../dependencies/openzeppelin/contracts/SafeERC20.sol';
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
-contract Pool {
+contract Pool is IPool, PoolStorage {
 	using SafeMath for uint256;
 	using WadRayMath for uint256;
-	using PercentageMath for uint256;
+	using PercentageMath for PercentageMath;
 	using SafeERC20 for IERC20;
-
 
 	constructor() {
 
 	}
 
-	struct AssetData {
-		address asset;
-		address token;
-		uint256 decimals;
-		address aggregator;
-		bool active;
-	}
-
-	enum UserType {NONE, SHARER, SHAREE}
-
 	function deposit(
 		address asset,
 		uint256 amount,
-		address to
+		address benefactor
 	) external {
-		DataTypes.AssetData storage assetData = _assetsData[asset];
+		PoolAsset storage poolAsset = poolAssets[asset];
 
-		ValidationLogic.validateDeposit(assetData, amount);
+		ValidationLogic.validateDeposit(poolAsset, amount);
 		require(amount != 0);
 		require(to != msg.sender);
 
-		address toToken = assetData.toTokenAddress;
+		address shareToken = poolAsset.shareTokenAddress;
 
-		assetData.updateState();
+		poolAsset.updateState();
 
 		// transfer asset in
-		IERC20(asset).safeTransferFrom(msg.sender, toToken, amount);
+		IERC20(asset).safeTransferFrom(msg.sender, shareToken, amount);
 
 		// mint to to
-		IToToken(toToken).mint(msg.sender, to, amount, assetData.liquidityIndex);
+		IShareToken(shareToken).mint(msg.sender, to, amount, poolAsset.liquidityIndex);
 
 		emit Deposit(asset, msg.sender, to, amount);
 	}
@@ -56,42 +45,56 @@ contract Pool {
 		address asset,
 		uint256 amount,
 		address sharer,
-		address sharee,
+		address benefactor,
 		uint256 userType
 	) external {
-		DataTypes.AssetData storage assetData = _assetsData[asset];
+		PoolAsset storage poolAsset = poolAssets[asset];
 
-		ValidationLogic.validateWithdraw(assetData, amount, sharer, sharee, userType);
+		ValidationLogic.validateWithdraw(poolAsset, amount, sharer, benefactor, userType);
 
-		address toToken = assetData.toTokenAddress;
+		address shareToken = poolAsset.shareTokenAddres;
 
-		assetData.updateState();
+		poolAsset.updateState();
 
 		// mint to to
-		IToToken(toToken).burn(msg.sender, userType, amount, assetData.liquidityIndex);
+		IShareToken(shareToken).burn(msg.sender, userType, amount, poolAsset.liquidityIndex);
 
 		emit Withdraw(asset, msg.sender, userType, amount);
 	}
-	function _checkValue(DataTypes.AssetData storage assetData) internal returns (uint256) {
-		uint256 assetIndex = _getIndex(asset);
-		return IERC20()
-	}
 
-	function calculateAmountInterest(
-		uint256 lastUpdatedAmount, 
-		uint256 amountAdded
-	)
-		internal
-		view
-		returns (uint256)
-	{
-		return (amountAdded.rayDiv(lastUpdatedAmount));
-	}
+    function initShareToken(
+        address asset,
+        address shareTokenAddress,
+        address decimals,
+        address aggregator
+    ) external override {
+        PoolAsset storage poolAsset = poolAssets[asset];
 
+        require(!poolAsset.active, "");
 
-	function initAsset(address asset, uint256 decimals) external {
-		AssetData storage assetData = _assetsData[asset];
-		assetData.liquidityIndex = 1e27;
-	}
+        poolAsset.liquidityIndex = 1e27;
+        poolAsset.aggregator = aggregator;
+        poolAsset.underlying = asset;
+        poolAsset.shareTokenAddress = shareTokenAddress;
 
+        addPoolAssetToListInternal(asset);
+
+        emit PoolAssetInit(
+            asset,
+            wrapped
+        );
+    }
+
+    function addPoolAssetToListInternal(address asset) internal {
+        uint256 _poolAssetsCount = poolAssetsCount;
+        bool poolAssetAlreadyAdded = false;
+        for (uint256 i = 0; i < _poolAssetsCount; i++)
+            if (poolAssetsList[i] == asset) {
+                poolAssetAlreadyAdded = true;
+            }
+        if (!poolAssetAlreadyAdded) {
+            poolAssetsList[poolAssetsCount] = asset;
+            poolAssetsCount = _poolAssetsCount + 1;
+        }
+    }
 }
