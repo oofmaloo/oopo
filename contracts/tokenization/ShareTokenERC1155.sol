@@ -1,9 +1,8 @@
 // SPDX-License-Identifier: agpl-3.0
 pragma solidity 0.8.10;
 
-import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
-
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import "@openzeppelin/contracts/utils/math/SafeMath.sol";
@@ -14,13 +13,43 @@ import {IAggregator} from '../interfaces/IAggregator.sol';
 import {IShareToken} from '../interfaces/IShareToken.sol';
 import {PercentageMath} from '../libraries/math/PercentageMath.sol';
 import {WadRayMath} from '../libraries/math/WadRayMath.sol';
+
+import {ERC1155Supply} from "@openzeppelin/contracts/token/ERC1155/extensions/ERC1155Supply.sol";
+import {ERC1155} from "@openzeppelin/contracts/token/ERC1155/ERC1155.sol";
+
 import {Context} from "@openzeppelin/contracts/utils/Context.sol";
 
-contract ShareToken is Context, ERC20, IShareToken {
+import "hardhat/console.sol";
+
+interface IShareTokenERC1155 {
+  function name() external view returns (string memory);
+
+  function symbol() external view returns (string memory);
+
+  function decimals() external view returns (uint8);
+
+  function totalSupply() external view returns (uint256);
+
+  function balanceOf(address account) external view returns (uint256);
+}
+
+contract ShareTokenERC1155 is Context, ERC1155Supply, IShareTokenERC1155, IShareToken {
 	using SafeMath for uint256;
 	using WadRayMath for uint256;
 	using PercentageMath for uint256;
 	using SafeERC20 for IERC20;
+
+	/**
+	* @dev TOTAL used for tracking totalSupply
+	*/
+	uint256 public constant TOTAL = 0; // read-only
+	/**
+	* @dev BENEFACTOR tracks a benefactors universal balance
+	* - This is the benefactors actual balance
+	* - The Sharer Account is data only for benefactor
+	* 		- Used for Sharer to track output
+	*/
+	uint256 public constant BENEFACTOR = 1; // read|write
 
 	IPool internal _pool;
 	IPoolAddressesProvider internal _poolAddressesProvider;
@@ -32,9 +61,6 @@ contract ShareToken is Context, ERC20, IShareToken {
 
   string private _name;
   string private _symbol;
-
-	uint256 private _totalSupply;
-
 	// sharer is the the initiator
 	// benefactor is the benefactor
 
@@ -50,6 +76,7 @@ contract ShareToken is Context, ERC20, IShareToken {
   // 	bool allowSharePercentageUpdates; // allow updates to yield share perc
   // 	bool active;
   // }
+
   // _sharer[benefactor][msg.sender] => Sharer
 	mapping(address => mapping(address => Sharer)) private _sharers;
 	// benefactors for the sharer
@@ -94,7 +121,7 @@ contract ShareToken is Context, ERC20, IShareToken {
     address underlyingAsset,
     uint8 decimals,
     address aggregator
-	) ERC20("", "") {
+	) ERC1155("") {
     string memory underlyingAssetName = IERC20Metadata(underlyingAsset).name();
     string memory underlyingAssetSymbol = IERC20Metadata(underlyingAsset).symbol();
 
@@ -102,20 +129,20 @@ contract ShareToken is Context, ERC20, IShareToken {
     string memory symbol = string(abi.encodePacked("share", underlyingAssetSymbol));
 
     _decimals = decimals;
-    // _setDecimals(decimals);
-    // _setName(name);
-    // _setSymbol(symbol);
-
 		_name = name;
 		_symbol = symbol;
+
+
     _poolAddressesProvider = IPoolAddressesProvider(provider);
     _pool = IPool(_poolAddressesProvider.getPool());
     _underlyingAsset = underlyingAsset;
-    initAggregator(aggregator);
+    _aggregator = IAggregator(aggregator);
+    IERC20(_underlyingAsset).safeIncreaseAllowance(aggregator, type(uint256).max);
   }
 
   function initAggregator(address aggregator) public onlyPoolAdmin {
   	_aggregator = IAggregator(aggregator);
+    IERC20(_underlyingAsset).safeIncreaseAllowance(aggregator, type(uint256).max);
   }
 
 	/**
@@ -123,9 +150,18 @@ contract ShareToken is Context, ERC20, IShareToken {
 	* - Only callable by the LendingPool, as extra state updates there need to be managed
 	* - Sends portion of designated assets to aggregation
 	* @param sharer The address receiving the minted tokens
-	* @param amount The amount of tokens getting minted
+	* @param benefactor The amount of tokens getting minted
+	* @param amount The new liquidity index of the reserve
+	* @param sharePercentage The percentage of appreciation to share to benefactor as 100.00%
+	* @param allowSharePercentageUpdates The new liquidity index of the reserve
 	* @param index The new liquidity index of the reserve
+
 	* - Once allowSharePercentageUpdates is set, it cannot be updated
+	* 
+	* - If account already ini, don't create new one
+	* - Send to aggregation
+	* - Update account
+	* - Mint to main data tracker
 	*/
 	function mint(
 		address sharer,
@@ -159,7 +195,14 @@ contract ShareToken is Context, ERC20, IShareToken {
 		// update index of sharer benefactor struct
 		_sharer.index = index;
 
-		_totalSupply = _totalSupply.add(amountScaled);
+		_mint(
+      sharer,
+      0,
+      amountScaled,
+      ""
+    );
+
+		// _totalSupply = _totalSupply.add(amountScaled);
 
 		// emit Transfer(address(0), sharer, amount);
 		// emit Mint(sharer, amount, index);
@@ -169,7 +212,7 @@ contract ShareToken is Context, ERC20, IShareToken {
 	* @dev Sets the share percentage for a benefactor by a sharer
 	* - Only updated if original mint `allowSharePercentageUpdates` 
 	**/
-	function setSharePercentage(address sharer, address benefactor, uint256 sharePercentage) external onlyPoolAdmin {
+	function setSharePercentage(address sharer, address benefactor, uint256 sharePercentage) external {
 			require(msg.sender == sharer);
 			require(sharePercentage <= 1e4, "Errors.CT_INVALID_MINT_AMOUNT");
 			Sharer storage _sharer = _sharers[sharer][benefactor];
@@ -181,6 +224,7 @@ contract ShareToken is Context, ERC20, IShareToken {
 	/**
 	* @dev Burns shareTokens from `sharer` and sends the equivalent amount of underlying to `receiver`
 	* - Only callable by the LendingPool, as extra state updates there need to be managed
+ 	* @param caller The caller
 	* @param sharer The owner of the shareTokens, getting them burned
 	* @param benefactor The owner of the shareTokens, getting them burned
 	* @param userType The address that will receive the underlying
@@ -199,10 +243,13 @@ contract ShareToken is Context, ERC20, IShareToken {
 		require(_sharer.active, "Errors.CT_INVALID_BURN_AMOUNT");
 
 		bool active = _updateBalances(_sharer, benefactor, index);
+		require(active, "Error: Active");
+		console.log("burn active", active);
 
 		uint256 scaledAmount = amount.rayDiv(index);
 
 		address receiver;
+		uint256 _id;
 		if (userType == 1) {
 			receiver = sharer;
 			require(caller == sharer, "Error: Match userType");
@@ -211,9 +258,20 @@ contract ShareToken is Context, ERC20, IShareToken {
 			receiver = benefactor;
 			require(caller == benefactor, "Error: Match userType");
 			_sharer.benefactorScaled -= scaledAmount;
+			_burn(
+	      receiver,
+	      1,
+	      scaledAmount
+	    );
 		}
 
 		redeem(amount, receiver);
+
+		_burn(
+      receiver,
+      0,
+      scaledAmount
+    );
 
 		// _totalSupply = _totalSupply.sub(scaledAmount);
 
@@ -232,7 +290,7 @@ contract ShareToken is Context, ERC20, IShareToken {
 	// 	// accrue()?
 	// 	Sharer storage _sharer = _sharers[sharer][benefactor];
 
-	// 	bool active = _updateBalances(_sharer, benefactor, index);
+	// 	bool active = _updateBalances(_sharer, index);
 
 	// 	if (!_sharer.active) {
 	// 		return (0,0);
@@ -270,18 +328,31 @@ contract ShareToken is Context, ERC20, IShareToken {
 		if (!_sharer.active) {
 			return false;
 		}
+		console.log("_updateBalances currentIndex", currentIndex);
 		uint256 sharerPrincipal = _sharer.scaledAmount.rayMul(_sharer.index);
+		console.log("_updateBalances sharerPrincipal", sharerPrincipal);
 		uint256 balance = _sharer.scaledAmount.rayMul(currentIndex);
+		console.log("_updateBalances balance", balance);
 		uint256 appreciation = balance.sub(sharerPrincipal);
+		console.log("_updateBalances appreciation", appreciation);
 		uint256 sendToBenefactorScaled = appreciation.percentMul(_sharer.sharePercentage).rayDiv(currentIndex);
+		console.log("_updateBalances sendToBenefactorScaled", sendToBenefactorScaled);
 
 		// update sharer and benefactor scaled balance
 		_sharer.scaledAmount -= sendToBenefactorScaled;
 		_sharer.benefactorScaled += sendToBenefactorScaled;
 
+		// _sharer.index = currentIndex; // ?
+
+		_mint(
+      benefactor,
+      1,
+      sendToBenefactorScaled,
+      ""
+    );
+
 		return true;
 	}
-
 
 	function getBalances(address sharer, address benefactor) public view override returns (uint256, uint256) {
 		Sharer storage _sharer = _sharers[sharer][benefactor];
@@ -292,6 +363,7 @@ contract ShareToken is Context, ERC20, IShareToken {
 
 		uint256 indexSim = _pool.getReserveNormalizedIncome(_underlyingAsset);
 
+		console.log("getBalances indexSim", indexSim);
 		(uint256 sharerBalance, uint256 benefactorBalance) = _getBalances(_sharer, indexSim);
 		return (sharerBalance, benefactorBalance);
 	}
@@ -303,13 +375,15 @@ contract ShareToken is Context, ERC20, IShareToken {
 
 		// benefactor
 		uint256 currentBenefactorBalance = _sharer.benefactorScaled.rayMul(_sharer.index);
+		console.log("_getBalances currentBenefactorBalance", currentBenefactorBalance);
 
 		// appreciation since last update
 		uint256 appreciation = balance.sub(sharerPrincipal);
+
 		// appreciation share to benefactor
 		uint256 sendToBenefactor = appreciation.percentMul(_sharer.sharePercentage);
 
-		return (balance.sub(sendToBenefactor).rayMul(currentIndex), currentBenefactorBalance.add(sendToBenefactor).rayMul(currentIndex));
+		return (balance.sub(sendToBenefactor), currentBenefactorBalance.add(sendToBenefactor));
 	}
 
 	function balanceOfBenefactor(address benefactor) external override returns (uint256) {
@@ -336,16 +410,16 @@ contract ShareToken is Context, ERC20, IShareToken {
 
 	/**
 	* @dev Calculates the balance of the sharer: principal balance + interest generated by the principal
-	* @param sharer The sharer whose balance is calculated
+	* @param account The sharer whose balance is calculated
 	* @return The balance of the sharer
 	**/
-	function balanceOf(address sharer)
+	function balanceOf(address account)
 		public
 		view
 		override
 		returns (uint256)
 	{
-		return super.balanceOf(sharer).rayMul(_pool.getReserveNormalizedIncome(_underlyingAsset));
+		return 0;
 	}
 
 	function getSharerData(address sharer, address benefactor)
@@ -363,7 +437,7 @@ contract ShareToken is Context, ERC20, IShareToken {
 	* @return The scaled balance of the sharer
 	**/
 	function scaledBalanceOf(address sharer) external view override returns (uint256) {
-		return super.balanceOf(sharer);
+		return super.balanceOf(sharer, 0);
 	}
 
 	/**
@@ -378,7 +452,7 @@ contract ShareToken is Context, ERC20, IShareToken {
 		override
 		returns (uint256, uint256)
 	{
-		return (super.balanceOf(sharer), super.totalSupply());
+		return (super.balanceOf(sharer, 0), super.totalSupply(0));
 	}
 
 	/**
@@ -388,7 +462,7 @@ contract ShareToken is Context, ERC20, IShareToken {
 	* @return the current total supply
 	**/
 	function totalSupply() public view override returns (uint256) {
-		uint256 currentSupplyScaled = super.totalSupply();
+		uint256 currentSupplyScaled = super.totalSupply(0);
 
 		if (currentSupplyScaled == 0) {
 			return 0;
@@ -402,7 +476,7 @@ contract ShareToken is Context, ERC20, IShareToken {
 	* @return the scaled total supply
 	**/
 	function scaledTotalSupply() public view override returns (uint256) {
-		return super.totalSupply();
+		return super.totalSupply(0);
 	}
 
 	/**
@@ -480,25 +554,37 @@ contract ShareToken is Context, ERC20, IShareToken {
       return true;
   }
 
-  // function _mint(Sharer storage _sharer, uint256 amount) public virtual override {
-  //   require(account != address(0), "ERC20: mint to the zero address");
+  /**
+   * @dev Returns the name of the token.
+   */
+  function name() public view override returns (string memory) {
+      return _name;
+  }
 
-  //   _beforeTokenTransfer(address(0), account, amount);
+  /**
+   * @dev Returns the symbol of the token, usually a shorter version of the
+   * name.
+   */
+  function symbol() public view override returns (string memory) {
+      return _symbol;
+  }
 
-  //   _totalSupply = _totalSupply.add(amount);
-  //   _sharer.scaledAmount = _sharer.scaledAmount.add(amount);
-  //   emit Transfer(address(0), account, amount);
 
-  // }
-
-  // function _burn(Sharer storage _sharer, uint256 amount) public virtual override {
-  //   require(account != address(0), "ERC20: burn from the zero address");
-
-  //   _beforeTokenTransfer(account, address(0), amount);
-
-  //   _sharer.scaledAmount = _sharer.scaledAmount.sub(amount, "ERC20: burn amount exceeds balance");
-  //   _totalSupply = _totalSupply.sub(amount);
-  //   emit Transfer(account, address(0), amount);
-  // }
+  /**
+   * @dev Returns the number of decimals used to get its user representation.
+   * For example, if `decimals` equals `2`, a balance of `505` tokens should
+   * be displayed to a user as `5.05` (`505 / 10 ** 2`).
+   *
+   * Tokens usually opt for a value of 18, imitating the relationship between
+   * Ether and Wei. This is the value {ERC20} uses, unless this function is
+   * overridden;
+   *
+   * NOTE: This information is only used for _display_ purposes: it in
+   * no way affects any of the arithmetic of the contract, including
+   * {IERC20-balanceOf} and {IERC20-transfer}.
+   */
+  function decimals() public view override returns (uint8) {
+      return 18;
+  }
 
 }

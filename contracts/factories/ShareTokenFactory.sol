@@ -1,19 +1,18 @@
 //SPDX-License-Identifier: Unlicense
-pragma solidity ^0.8.0;
+pragma solidity 0.8.10;
 
 import {IPoolAddressesProvider} from '../interfaces/IPoolAddressesProvider.sol';
 import {IPool} from '../interfaces/IPool.sol';
-import {ICollateralTokenFactory} from '../interfaces/ICollateralTokenFactory.sol';
 import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
+import '../tokenization/ShareToken.sol';
+import '../tokenization/ShareTokenERC1155.sol';
 
-import '../tokens/CollateralToken.sol';
-import '../tokens/YCollateralToken.sol';
-import {ICollateralToken} from '../interfaces/ICollateralToken.sol';
+import "hardhat/console.sol";
 
 contract ShareTokenFactory {
 
-  IPoolAddressesProvider _provider;
-  IPool _pool;
+  IPoolAddressesProvider private _provider;
+  IPool private _pool;
 
   constructor(IPoolAddressesProvider provider) {
       _provider = provider;
@@ -25,24 +24,21 @@ contract ShareTokenFactory {
       _;
   }
 
-  /**
-   * @dev Initiates collateral token
-   * @param asset The underlying asset
-   * @param aggregator The protocol asset router
-   **/
   function initShareToken(
+      address provider,
       address asset,
       address aggregator
-  ) public override onlyPoolAdmin {
+  ) public {
       uint8 decimals = IERC20Metadata(asset).decimals();
 
-      ShareToken shareTokenInstance = new ShareToken(address(_provider), asset, decimals);
-      address token = address(shareTokenInstance);
+      ShareTokenERC1155 shareTokenInstance = new ShareTokenERC1155(provider, asset, decimals, aggregator);
+      address shareTokenAddress = address(shareTokenInstance);
 
-      _pool.initShareToken(
-          asset,
-          token,
-          aggregator
+      _pool.initPoolAsset(
+        asset,
+        shareTokenAddress,
+        decimals,
+        aggregator
       );
   }
 }

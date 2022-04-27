@@ -1,6 +1,8 @@
 //SPDX-License-Identifier: Unlicense
-pragma solidity ^0.8.0;
+pragma solidity 0.8.10;
 import {IPoolAddressesProvider} from '../interfaces/IPoolAddressesProvider.sol';
+import {DataTypes} from '../libraries/types/DataTypes.sol';
+import {AssetLogic} from '../libraries/AssetLogic.sol';
 
 /**
  * @title PoolStorage
@@ -8,18 +10,10 @@ import {IPoolAddressesProvider} from '../interfaces/IPoolAddressesProvider.sol';
  * @title Protocol storage
  */
 contract PoolStorage {
+    using AssetLogic for DataTypes.PoolAssetData;
 
-    struct PoolAsset {
-    	bool active;
-    	address underlying;
-    	address shareTokenAddress;
-    	uint256 decimals;
-    	uint256 index;
-    	address aggregator;
-    }
-
-    // poolAssetsList[underlying] => PoolAsset
-    mapping(address => PoolAsset) internal poolAssets;
+    // poolAssetsList[underlying] => PoolAssetData
+    mapping(address => DataTypes.PoolAssetData) internal poolAssets;
 
     // poolAssetsList[uint256] => mapping
     mapping(uint256 => address) public poolAssetsList;
@@ -28,6 +22,6 @@ contract PoolStorage {
 
     bool internal paused;
 
-    IPoolAddressesProvider internal addressesProvider;
+    IPoolAddressesProvider internal _addressesProvider;
 
 }

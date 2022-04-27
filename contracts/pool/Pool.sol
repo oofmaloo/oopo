@@ -1,30 +1,48 @@
 // SPDX-License-Identifier: agpl-3.0
-pragma solidity ^0.8.0;
+pragma solidity 0.8.10;
 
-import {SafeMath} from '../../../dependencies/openzeppelin/contracts/SafeMath.sol';
+import {IPool} from '../interfaces/IPool.sol';
+import {IPoolAddressesProvider} from '../interfaces/IPoolAddressesProvider.sol';
+import {IShareToken} from '../interfaces/IShareToken.sol';
+
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+
+import {AssetLogic} from '../libraries/AssetLogic.sol';
+import {ValidationLogic} from '../libraries/ValidationLogic.sol';
+import {DataTypes} from '../libraries/types/DataTypes.sol';
+
+import {WadRayMath} from '../libraries/math/WadRayMath.sol';
+import {PercentageMath} from '../libraries/math/PercentageMath.sol';
+import {PoolStorage} from './PoolStorage.sol';
+
+import "@openzeppelin/contracts/utils/math/SafeMath.sol";
+
+import "hardhat/console.sol";
 
 contract Pool is IPool, PoolStorage {
 	using SafeMath for uint256;
 	using WadRayMath for uint256;
-	using PercentageMath for PercentageMath;
+	using PercentageMath for uint256;
 	using SafeERC20 for IERC20;
 
-	constructor() {
+	using AssetLogic for DataTypes.PoolAssetData;
 
+	constructor(IPoolAddressesProvider addressesProvider_) {
+		_addressesProvider = addressesProvider_;
 	}
 
 	function deposit(
 		address asset,
 		uint256 amount,
-		address benefactor
+		address benefactor,
+		uint256 sharePercentage,
+		bool allowSharePercentageUpdates
 	) external {
-		PoolAsset storage poolAsset = poolAssets[asset];
+		DataTypes.PoolAssetData storage poolAsset = poolAssets[asset];
 
-		ValidationLogic.validateDeposit(poolAsset, amount);
-		require(amount != 0);
-		require(to != msg.sender);
+		ValidationLogic.validateDeposit(poolAsset, benefactor, amount);
 
 		address shareToken = poolAsset.shareTokenAddress;
 
@@ -34,13 +52,26 @@ contract Pool is IPool, PoolStorage {
 		IERC20(asset).safeTransferFrom(msg.sender, shareToken, amount);
 
 		// mint to to
-		IShareToken(shareToken).mint(msg.sender, to, amount, poolAsset.liquidityIndex);
+		IShareToken(shareToken).mint(
+			msg.sender, 
+			benefactor, 
+			amount, 
+			sharePercentage, 
+			allowSharePercentageUpdates, 
+			poolAsset.index
+		);
 
-		emit Deposit(asset, msg.sender, to, amount);
+		emit Deposit(asset, msg.sender, benefactor, amount);
 	}
 
-	// call as caller
-	// use withdrawTo if recipient
+	/**
+	* @dev Withdraws underlying
+	* @param asset The address of the poolAsset
+	* @param amount The amount to be withdrawn
+	* @param sharer The sharer account to remove from
+	* @param benefactor The benefactor of the account
+	* @param userType The user caller
+	*/
 	function withdraw(
 		address asset,
 		uint256 amount,
@@ -48,40 +79,56 @@ contract Pool is IPool, PoolStorage {
 		address benefactor,
 		uint256 userType
 	) external {
-		PoolAsset storage poolAsset = poolAssets[asset];
+		DataTypes.PoolAssetData storage poolAsset = poolAssets[asset];
 
-		ValidationLogic.validateWithdraw(poolAsset, amount, sharer, benefactor, userType);
+		ValidationLogic.validateWithdraw(poolAsset, amount, msg.sender, sharer, benefactor, userType);
 
-		address shareToken = poolAsset.shareTokenAddres;
+		address shareToken = poolAsset.shareTokenAddress;
 
 		poolAsset.updateState();
 
-		// mint to to
-		IShareToken(shareToken).burn(msg.sender, userType, amount, poolAsset.liquidityIndex);
+		// confirmed on validated
+		// if (uint256(DataTypes.UserType.SHARER) == userType) {
+		// 	IShareToken(shareToken).updatedBalanceOfSharer(sharer, poolAsset.index);
+		// } else {
+		// 	IShareToken(shareToken).updatedBalanceOfBenefactor(benefactor, poolAsset.index);
+		// }
+
+		IShareToken(shareToken).burn(msg.sender, sharer, benefactor, userType, amount, poolAsset.index);
 
 		emit Withdraw(asset, msg.sender, userType, amount);
 	}
 
-    function initShareToken(
+	function getReserveNormalizedIncome(address asset) external view override returns (uint256) {
+		DataTypes.PoolAssetData storage poolAsset = poolAssets[asset];
+		return poolAsset.getNormalizedIncome();
+	}
+
+	function getPoolAssetData(address asset) external view returns (DataTypes.PoolAssetData memory) {
+		return poolAssets[asset];
+	}
+
+    function initPoolAsset(
         address asset,
         address shareTokenAddress,
-        address decimals,
-        address aggregator
+        uint8 decimals,
+        address aggregatorAddress
     ) external override {
-        PoolAsset storage poolAsset = poolAssets[asset];
+        DataTypes.PoolAssetData storage poolAsset = poolAssets[asset];
 
-        require(!poolAsset.active, "");
+        require(!poolAsset.active, "Error: Active");
 
-        poolAsset.liquidityIndex = 1e27;
-        poolAsset.aggregator = aggregator;
+        poolAsset.index = uint128(WadRayMath.ray());
+        poolAsset.aggregatorAddress = aggregatorAddress;
         poolAsset.underlying = asset;
         poolAsset.shareTokenAddress = shareTokenAddress;
+        poolAsset.active = true;
 
         addPoolAssetToListInternal(asset);
 
         emit PoolAssetInit(
             asset,
-            wrapped
+            shareTokenAddress
         );
     }
 
